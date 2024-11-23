@@ -6,34 +6,38 @@ use axum::{
         Path, WebSocketUpgrade,
     },
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Extension, Router,
 };
 use chrono::{DateTime, Utc};
-use futures::{SinkExt, StreamExt};
-use serde::Serialize;
+use futures::{stream::SplitSink, SinkExt, StreamExt};
+use model::FlattenedItem;
+use serde::{Deserialize, Serialize};
 use shuttle_axum::ShuttleAxum;
 use tokio::{
     sync::{watch, Mutex},
     time::sleep,
 };
 use tower_http::services::ServeDir;
-
+pub mod handler;
+pub mod model;
+pub mod scripts;
 struct State {
-    clients_count: usize,
-    connections: HashMap<String, String>,
+    total_clients: usize,
+    connections: HashMap<String, Arc<Mutex<SplitSink<WebSocket, Message>>>>,
     rx: watch::Receiver<Message>,
 }
 
 const PAUSE_SECS: u64 = 15;
 const STATUS_URI: &str = "https://api.shuttle.dev/.healthz";
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Response {
-    clients_count: usize,
+    data: Option<Vec<FlattenedItem>>,
+    total_clients: usize,
     #[serde(rename = "dateTime")]
     date_time: DateTime<Utc>,
-    is_up: bool,
+    result: bool,
 }
 
 #[shuttle_runtime::main]
@@ -41,38 +45,42 @@ async fn main() -> ShuttleAxum {
     let (tx, rx) = watch::channel(Message::Text("{}".to_string()));
 
     let state = Arc::new(Mutex::new(State {
-        clients_count: 0,
+        total_clients: 0,
         connections: HashMap::new(),
         rx,
     }));
 
     // Spawn a thread to continually check the status of the api
-    let state_send = state.clone();
-    tokio::spawn(async move {
-        let duration = Duration::from_secs(PAUSE_SECS);
+    // let state_send: Arc<Mutex<State>> = state.clone();
+    // tokio::spawn(async move {
+    //     let duration = Duration::from_secs(PAUSE_SECS);
 
-        loop {
-            let is_up = reqwest::get(STATUS_URI)
-                .await
-                .is_ok_and(|r| r.status().is_success());
+    //     loop {
+    //         // let result = reqwest::get(STATUS_URI)
+    //         //     .await
+    //         //     .is_ok_and(|r| r.status().is_success());
 
-            let response = Response {
-                clients_count: state_send.lock().await.clients_count,
-                date_time: Utc::now(),
-                is_up,
-            };
-            let msg = serde_json::to_string(&response).unwrap();
+    //         let response = Response {
+    //             total_clients: state_send.lock().await.total_clients,
+    //             date_time: Utc::now(),
+    //             result:false
+    //         };
+    //         let msg = serde_json::to_string(&response).unwrap();
 
-            if tx.send(Message::Text(msg)).is_err() {
-                break;
-            }
+    //         if tx.send(Message::Text(msg)).is_err() {
+    //             break;
+    //         }
 
-            sleep(duration).await;
-        }
-    });
+    //         sleep(duration).await;
+    //     }
+    // });
 
     let router = Router::new()
         .route("/websocket/:address", get(websocket_handler))
+        .route("/api/user/:address_id", get(handler::get_user))
+        .route("/api/:address_id/game/start", get(handler::game_start))
+        .route("/api/:address_id/mint", post(handler::mint_nft))
+        .route("/api/:address_id/game/end", get(handler::game_end))
         .nest_service("/", ServeDir::new("static"))
         .layer(Extension(state));
 
@@ -87,56 +95,81 @@ async fn websocket_handler(
     ws.on_upgrade(|socket| websocket(address, socket, state))
 }
 
-async fn websocket(address: String, stream: WebSocket, state: Arc<Mutex<State>>) {
-    // ===================================================================
-    // By splitting the WebSocket stream, we can send and receive messages
-    // simultaneously, enabling full-duplex communication with the client
-    // ===================================================================
-    let (mut sender, mut receiver) = stream.split();
+async fn websocket(address_id: String, stream: WebSocket, state: Arc<Mutex<State>>) {
+    // Split the WebSocket stream into sender and receiver
+    let (sender, mut receiver) = stream.split();
+
+    // Clone the watch receiver for broadcasting
+    // let mut rx = {
+    //     let mut state = state.lock().await;
+    //     state.total_clients += 1;
+    //     // Insert the sender into the connections HashMap wrapped in Arc<Mutex<>>
+    //     state
+    //         .connections
+    //         .insert(address_id.clone(), Arc::new(Mutex::new(sender)));
+    //     state.rx.clone()
+    // };
 
     let mut rx = {
         let mut state = state.lock().await;
-        state.clients_count += 1;
-        state.connections.insert(address.clone(), "123".to_string());
-        state.rx.clone()
+
+        // Check if the connection for the address_id already exists
+        if state.connections.contains_key(&address_id) {
+            return eprintln!("Connection for address_id '{}' already exists", address_id);
+        } else {
+            // Insert the sender into the connections HashMap wrapped in Arc<Mutex<>>
+            state.total_clients += 1;
+            state
+                .connections
+                .insert(address_id.clone(), Arc::new(Mutex::new(sender)));
+            state.rx.clone()
+        }
     };
 
-    //End.
+    // Clone the connection Arc for the send task
+    // let connection = {
+    //     let state = state.lock().await;
+    //     state.connections.get(&address_id).unwrap().clone()
+    // };
 
-    // ===================================================================
-    // This task will receive watch messages and forward it to this connected client.
-    // ===================================================================
+    // Spawn a task to send broadcast messages to the client
+    // let mut send_task = tokio::spawn(async move {
+    //     while let Ok(()) = rx.changed().await {
+    //         let msg = rx.borrow().clone();
+    //         let mut sender = connection.lock().await;
+    //         if sender.send(msg.clone()).await.is_err() {
+    //             break;
+    //         }
+    //     }
+    // });
 
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(()) = rx.changed().await {
-            let msg = rx.borrow().clone();
-            if sender.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // ===================================================================
-    // This task will receive messages from this client.
-    // ===================================================================
-
+    // Spawn a task to receive messages from the client
+    // Clone address_id before moving it into the task
+    let address_id_clone = address_id.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            println!("this example does not read any messages, but got: {text}");
+            println!("Received message from {}: {}", address_id_clone, text);
+            // Handle incoming messages here if needed
         }
     });
 
-    // ===================================================================
-    // If any one of the tasks exit, abort the other.
-    // ===================================================================
+    // Use tokio::select! with mutable references
+    // tokio::select! {
+    //     _ = &mut send_task => recv_task.abort(),
+    //     _ = &mut recv_task => send_task.abort(),
+    // };
 
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    };
+    // Await the recv_task to complete
+    if let Err(e) = recv_task.await {
+        eprintln!("recv_task failed for {}: {}", address_id, e);
+    }
 
-    //End.
+    // Clean up when the client disconnects
+    {
+        let mut state = state.lock().await;
+        state.total_clients -= 1;
+        state.connections.remove(&address_id);
+    }
 
-    // This client disconnected
-    state.lock().await.clients_count -= 1;
+    println!("WebSocket connection with {} closed", address_id);
 }
