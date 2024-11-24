@@ -82,8 +82,11 @@ async fn main() -> ShuttleAxum {
         .route("/api/:address_id/mint", post(handler::mint_nft))
         .route("/api/:address_id/game/end", get(handler::game_end))
         .nest_service("/", ServeDir::new("static"))
-        .layer(Extension(state));
-
+        .layer(Extension(state))
+        .layer(tower_http::cors::CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any));
     Ok(router.into())
 }
 
