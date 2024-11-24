@@ -1,4 +1,8 @@
-use crate::{model::{NFTItem, Root}, scripts::get_user_script, Response, State};
+use crate::{
+    model::{NFTItem, Root},
+    scripts::get_user_script,
+    Response, State,
+};
 use axum::{
     extract::{ws::Message, Extension, Path},
     response::IntoResponse,
@@ -51,7 +55,7 @@ pub async fn get_user(
                                     total_clients: state.total_clients,
                                     date_time: chrono::Utc::now(),
                                     result: false,
-                                    data: None
+                                    data: None,
                                 });
                             }
                         };
@@ -66,7 +70,7 @@ pub async fn get_user(
                             total_clients: state.total_clients,
                             date_time: chrono::Utc::now(),
                             result: true,
-                            data: Some(items)
+                            data: Some(items),
                         })
                     }
                     Err(_e) => Json(Response {
@@ -82,7 +86,7 @@ pub async fn get_user(
                     total_clients: state.total_clients,
                     date_time: chrono::Utc::now(),
                     result: false,
-                    data: None
+                    data: None,
                 })
             }
         }
@@ -90,7 +94,7 @@ pub async fn get_user(
             total_clients: state.total_clients,
             date_time: chrono::Utc::now(),
             result: false,
-            data: None
+            data: None,
         }),
     }
 }
@@ -112,7 +116,7 @@ pub async fn game_start(
                 total_clients: state.total_clients,
                 date_time: chrono::Utc::now(),
                 result: true,
-                data: None
+                data: None,
             });
         }
     }
@@ -122,7 +126,7 @@ pub async fn game_start(
         total_clients: state.total_clients,
         date_time: chrono::Utc::now(),
         result: false,
-        data: None
+        data: None,
     })
 }
 
@@ -143,7 +147,7 @@ pub async fn game_end(
                 total_clients: state.total_clients,
                 date_time: chrono::Utc::now(),
                 result: true,
-                data: None
+                data: None,
             });
         }
     }
@@ -153,7 +157,7 @@ pub async fn game_end(
         total_clients: state.total_clients,
         date_time: chrono::Utc::now(),
         result: false,
-        data: None
+        data: None,
     })
 }
 
@@ -168,18 +172,15 @@ pub async fn mint_nft(
     if let Some(ws_sender) = state.connections.get(&address_id) {
         println!("found ws address ....... ");
         let mut sender = ws_sender.lock().await;
-
-        // Send a message to request user data
-        let message = serde_json::json!({
-            "type": "mint-nft",
-            "data": request
-        });
-        if let Ok(_) = sender.send(Message::Text(message.to_string())).await {
+        if let Ok(_) = sender
+            .send(Message::Text(serde_json::to_string(&request).unwrap()))
+            .await
+        {
             return Json(Response {
                 total_clients: state.total_clients,
                 date_time: chrono::Utc::now(),
                 result: true,
-                data: None
+                data: None,
             });
         }
     }
@@ -189,6 +190,6 @@ pub async fn mint_nft(
         total_clients: state.total_clients,
         date_time: chrono::Utc::now(),
         result: false,
-        data: None
+        data: None,
     })
 }
